@@ -50,7 +50,7 @@ class CPOConfig:
     method: str = field(default="cpo")
     suffix: str = field(default="")  # !!!
     seed: int = field(default=100)  # !!!
-    device: str = field(default="cpu")
+    device: str = field(default="cuda")
     save_interval: int = field(default=4)
     render: bool = field(default=False)
     resume: bool = field(default=False)

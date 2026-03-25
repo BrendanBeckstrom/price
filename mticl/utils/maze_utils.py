@@ -244,7 +244,7 @@ class MazePlanner:
         if direction == Direction.FREEZE:
             return np.zeros(8), Direction.FREEZE
         policy = self.policies[direction]
-        raw_action = policy(Batch(obs=np.array([obs]))).act[0].detach().numpy()
+        raw_action = policy(Batch(obs=np.array([obs]))).act[0].detach().cpu().numpy()
         policy_act = policy.map_action(raw_action)
         return policy_act, direction
 

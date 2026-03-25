@@ -83,7 +83,7 @@ def setup_env(args, render_mode=None):
 
 
 def setup_plot_settings():
-    matplotlib.rcParams["text.usetex"] = True
+    matplotlib.rcParams["text.usetex"] = False
     matplotlib.rc("font", family="serif", serif=["Palatino"])
     sns.set(font="serif", font_scale=1.4)
     sns.set_style(

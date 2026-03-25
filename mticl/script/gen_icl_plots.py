@@ -24,7 +24,7 @@ def plot(stats):
         color="#008000",
         linestyle="--",
     )
-    plt.xlabel("$\\texttt{ICL}$ Iteration")
+    plt.xlabel("ICL Iteration")
     plt.ylabel(stats["y_label"])
     if stats["key"] == "constraint" and stats["constraint_type"] == "Velocity":
         ax = plt.gca()
@@ -106,7 +106,7 @@ def extract_stats(args: ICLConfig):
             gt[0:6, 2:5] = 1
             gt[4:10, 6:9] = 1
 
-            for i in range(5):
+            for i in range(3):
                 log_path = args.log_path.replace("mticl_0", f"mticl_{i}")
                 data = np.load(osp.join(log_path, f"mticl_{i}.npz"))
                 learner_rewards.append(data["rewards"])

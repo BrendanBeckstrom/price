@@ -7,7 +7,7 @@ from tqdm import tqdm
 
 
 def to_torch(x: np.ndarray):
-    return torch.from_numpy(x).type(torch.float32)
+    return torch.tensor(x, dtype=torch.float32)
 
 
 class Constraint(nn.Module):

@@ -9,7 +9,9 @@ from utils import setup_plot_settings
 @pyrallis.wrap()
 def gen_plots(args: ExpConfig):
     setup_plot_settings()
-    cl = MazeConstraintLearner(args.icl_config, args.maze_task, args.exp_name)
+    cl = MazeConstraintLearner(
+        args.icl_config, args.maze_task, args.exp_name, args.task_goals
+    )
     plot_path = "plots/maze"
 
     # Single-Task ICL Constraints

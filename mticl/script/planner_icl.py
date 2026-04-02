@@ -1,7 +1,7 @@
 import math
 import os
 import os.path as osp
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from itertools import product
 
 import matplotlib.pyplot as plt
@@ -22,19 +22,27 @@ class ExpConfig:
     icl_config: ICLConfig = ICLConfig()
     baseline: bool = False
     epochs: int = 5
+    num_tasks: int = 10
+    task_goals: list = field(default_factory=lambda: list(range(10)))
 
 
 class MazeConstraintLearner:
     def __init__(
-        self, args: ICLConfig, maze_task: int, exp_name: str, baseline: bool = False
+        self,
+        args: ICLConfig,
+        maze_task: int,
+        exp_name: str,
+        task_goals: list,
+        baseline: bool = False,
     ):
         self.args = args
         self.maze_task = maze_task
         self.exp_name = exp_name
+        self.task_goals = list(task_goals)
         self.constraint = MazeConstraint()
         self.learner_buffer = None
 
-        if self.maze_task in range(10):
+        if self.maze_task in self.task_goals:
             self.demos = np.load(
                 f"demos/maze_goal_{self.maze_task}_demos.npz",
                 allow_pickle=True,
@@ -45,7 +53,7 @@ class MazeConstraintLearner:
                     np.load(f"demos/maze_goal_{i}_demos.npz", allow_pickle=True,)[
                         "constraint_input"
                     ][:, :2]
-                    for i in range(10)
+                    for i in self.task_goals
                 ],
                 axis=0,
             )
@@ -94,15 +102,15 @@ class MazeConstraintLearner:
 
         # Collect learner trajs
         if self.maze_task == -1:
-            for i in range(10):
+            for i in self.task_goals:
                 trajs, task_rewards, task_constraints = self.collect_task(
                     i, outer_epoch
                 )
                 learner_trajs.extend(trajs)
                 reward += task_rewards
                 constraint += task_constraints
-            reward /= 10
-            constraint /= 10
+            reward /= len(self.task_goals)
+            constraint /= len(self.task_goals)
         else:
             learner_trajs, task_rewards, task_constraints = self.collect_task(
                 self.maze_task, outer_epoch
@@ -206,7 +214,11 @@ def train(args: ExpConfig):
     os.makedirs(args.icl_config.log_path, exist_ok=True)
 
     cl = MazeConstraintLearner(
-        args.icl_config, args.maze_task, args.exp_name, args.baseline
+        args.icl_config,
+        args.maze_task,
+        args.exp_name,
+        args.task_goals,
+        args.baseline,
     )
     cl.visualize_constraint(-1)
 

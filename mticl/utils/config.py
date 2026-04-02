@@ -50,7 +50,7 @@ class CPOConfig:
     method: str = field(default="cpo")
     suffix: str = field(default="")  # !!!
     seed: int = field(default=100)  # !!!
-    device: str = field(default="cuda")
+    device: str = field(default="cpu")
     save_interval: int = field(default=4)
     render: bool = field(default=False)
     resume: bool = field(default=False)
@@ -111,13 +111,15 @@ class ICLConfig(CPOConfig):
     def __post_init__(self):
         self.method = "icl"
         self.log_dir = "learners"
-        self.log_path = osp.join(
+        default_log_path = osp.join(
             osp.dirname(osp.realpath(__file__)),
             "../..",
             self.log_dir,
             self.task,
             self.exp_name,
         )
+        if not self.log_path:
+            self.log_path = default_log_path
         match (self.constraint_type, self.task):
             case ("Velocity", "AntBulletEnv-v0"):
                 self.reward_threshold = 1800

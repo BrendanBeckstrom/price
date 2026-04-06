@@ -7,12 +7,14 @@ import av
 import gymnasium
 import gymnasium_robotics
 import numpy as np
+import torch
 from tianshou.data import Batch
 from utils.config import CPOConfig
 from utils.envs import AntMazeWrapper
 from utils.policy import load_ant_policies
 
-ANT_POLICIES = load_ant_policies(CPOConfig())
+_maze_policy_device = "cuda" if torch.cuda.is_available() else "cpu"
+ANT_POLICIES = load_ant_policies(CPOConfig(device=_maze_policy_device))
 
 
 class Direction(IntEnum):

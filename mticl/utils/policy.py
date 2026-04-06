@@ -84,7 +84,12 @@ def setup_policy(args, env, no_log=False):
 def load_policy(policy, cl, ckpt_path, device):
     if osp.exists(ckpt_path):
         print(ckpt_path)
-        checkpoint = torch.load(ckpt_path, map_location=device)
+        try:
+            checkpoint = torch.load(
+                ckpt_path, map_location=device, weights_only=False
+            )
+        except TypeError:
+            checkpoint = torch.load(ckpt_path, map_location=device)
         policy.load_state_dict(checkpoint["model"], strict=False)
         if cl is not None and cl.constraint is not None:
             cl.constraint.load_state_dict(checkpoint["constraint"], strict=True)

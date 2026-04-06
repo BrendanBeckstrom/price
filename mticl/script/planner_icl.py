@@ -1,7 +1,9 @@
 import math
 import os
 import os.path as osp
+import sys
 from dataclasses import dataclass
+from pathlib import Path
 from itertools import product
 
 import matplotlib.pyplot as plt
@@ -11,6 +13,20 @@ import seaborn as sns
 import torch
 from torch.optim import Adam
 from tqdm import tqdm
+
+_REPO = Path(__file__).resolve().parents[2]
+if str(_REPO) not in sys.path:
+    sys.path.insert(0, str(_REPO))
+
+from price.maze_metrics import wall_violation_count
+from price.reward_model import train_reward_model_on_pairs
+from price.router import (
+    label_dispreferred_gt_wall,
+    label_dispreferred_random,
+    route_preference_batch,
+    sample_trajectory_pairs,
+)
+from price.trajectory import TrajectoryRecord
 from utils import ICLConfig, MazePlanner, setup_plot_settings, to_torch
 from utils.constraints import MazeConstraint
 
@@ -22,6 +38,8 @@ class ExpConfig:
     icl_config: ICLConfig = ICLConfig()
     baseline: bool = False
     epochs: int = 5
+    use_price: bool = False
+    """If True, sets icl_config.price.enabled (CLI: --use_price). Other fields: --icl_config.price.*"""
 
 
 class MazeConstraintLearner:
@@ -33,6 +51,10 @@ class MazeConstraintLearner:
         self.exp_name = exp_name
         self.constraint = MazeConstraint()
         self.learner_buffer = None
+        self.epoch_trajs: list[TrajectoryRecord] = []
+        self.routed_safety_xy = np.zeros((0, 2), dtype=np.float64)
+        self._price_rm_pairs: list = []
+        self._reward_model = None
 
         if self.maze_task in range(10):
             self.demos = np.load(
@@ -52,16 +74,84 @@ class MazeConstraintLearner:
         else:
             raise NotImplementedError(f"Invalid maze task: {self.maze_task}")
 
+    def prepare_price_constraint_phase(self, outer_epoch: int) -> None:
+        self.routed_safety_xy = np.zeros((0, 2), dtype=np.float64)
+        self._price_rm_pairs = []
+        if not self.args.price.enabled:
+            return
+        if self.args.price.oracle == "none":
+            return
+        if len(self.epoch_trajs) < 2:
+            return
+
+        rng = np.random.default_rng(int(self.args.price.rng_seed) + int(outer_epoch))
+        n_pairs = int(self.args.price.pairs_per_constraint_phase)
+        pairs = sample_trajectory_pairs(self.epoch_trajs, n_pairs, rng)
+        if not pairs:
+            return
+
+        if self.args.price.oracle == "gt_wall":
+            label_fn = label_dispreferred_gt_wall
+        elif self.args.price.oracle == "random":
+            label_fn = lambda a, b: label_dispreferred_random(a, b, rng)
+        else:
+            raise ValueError(f"Unknown price.oracle: {self.args.price.oracle}")
+
+        res = route_preference_batch(pairs, label_fn, self.args.price, rng)
+        self.routed_safety_xy = np.asarray(res.safety_positions, dtype=np.float64)
+        self._price_rm_pairs = res.low_reward_pairs
+
+    def train_price_reward_model_pass(self) -> None:
+        if not self.args.price.enabled or self.args.price.reward_model_steps <= 0:
+            return
+        if not self._price_rm_pairs:
+            return
+        self._reward_model, loss = train_reward_model_on_pairs(
+            self._reward_model,
+            self._price_rm_pairs,
+            self.args.price.reward_model_steps,
+            self.args.price.reward_model_lr,
+        )
+        print(f"PRICE reward model mean loss: {loss:.6f}")
+
     def sample_batch(self):
         expert_indices = np.random.choice(
             self.demos.shape[0], self.args.constraint_batch_size, replace=False
         )
-        learner_indices = np.random.choice(
-            self.learner_buffer.shape[0], self.args.constraint_batch_size, replace=False
-        )
+        bs = self.args.constraint_batch_size
 
         expert_batch = to_torch(self.demos[expert_indices])
-        learner_batch = to_torch(self.learner_buffer[learner_indices])
+
+        if (
+            self.args.price.enabled
+            and self.routed_safety_xy.size > 0
+            and self.routed_safety_xy.shape[0] > 0
+        ):
+            n_route = min(
+                int(bs * self.args.price.routed_batch_fraction),
+                self.routed_safety_xy.shape[0],
+                bs,
+            )
+            n_rest = bs - n_route
+            route_idx = np.random.choice(
+                self.routed_safety_xy.shape[0], size=n_route, replace=True
+            )
+            route_part = self.routed_safety_xy[route_idx]
+            if n_rest > 0:
+                learner_indices = np.random.choice(
+                    self.learner_buffer.shape[0], size=n_rest, replace=False
+                )
+                rest_part = self.learner_buffer[learner_indices]
+                learner_xy = np.concatenate([route_part, rest_part], axis=0)
+            else:
+                learner_xy = route_part
+        else:
+            learner_indices = np.random.choice(
+                self.learner_buffer.shape[0], size=bs, replace=False
+            )
+            learner_xy = self.learner_buffer[learner_indices]
+
+        learner_batch = to_torch(np.asarray(learner_xy, dtype=np.float64))
 
         assert expert_batch.shape == learner_batch.shape
         return expert_batch, learner_batch
@@ -72,46 +162,60 @@ class MazeConstraintLearner:
             np.zeros((10, 10)) if outer_epoch == 0 else self.discretize_constraint()
         )
         task_trajs, task_reward, task_constraint = [], [], []
+        records: list[TrajectoryRecord] = []
         for start_row in [0, 9]:
             start, goal = (start_row, 0), (task, 9)
             planner = MazePlanner(start, goal, constraint_grid)
             for _ in range(10):
                 _, _, ci, _, rewards = planner.gen_valid_demo()
+                ci_arr = [np.asarray(x, dtype=np.float64).reshape(-1) for x in ci]
+                positions = np.stack([x[:2] for x in ci_arr], axis=0)
+                wv = wall_violation_count(planner, ci_arr)
+                records.append(
+                    TrajectoryRecord(
+                        positions=positions.astype(np.float64),
+                        cum_return=float(sum(rewards)),
+                        wall_violations=wv,
+                        goal_id=int(task),
+                    )
+                )
                 task_trajs.extend(ci)
                 task_reward.append(sum(rewards))
                 task_constraint.append(
-                    sum([planner.compute_constraint(pos) for pos in ci])
+                    sum([planner.compute_constraint(pos[:2]) for pos in ci_arr])
                 )
         return (
             task_trajs,
+            records,
             np.array(task_reward).mean(),
             np.array(task_constraint).mean(),
         )
 
     def collect_trajs(self, outer_epoch):
+        self.epoch_trajs = []
         learner_trajs = []
         reward, constraint = 0, 0
 
-        # Collect learner trajs
         if self.maze_task == -1:
             for i in range(10):
-                trajs, task_rewards, task_constraints = self.collect_task(
+                trajs, recs, task_rewards, task_constraints = self.collect_task(
                     i, outer_epoch
                 )
                 learner_trajs.extend(trajs)
+                self.epoch_trajs.extend(recs)
                 reward += task_rewards
                 constraint += task_constraints
             reward /= 10
             constraint /= 10
         else:
-            learner_trajs, task_rewards, task_constraints = self.collect_task(
+            learner_trajs, recs, task_rewards, task_constraints = self.collect_task(
                 self.maze_task, outer_epoch
             )
+            self.epoch_trajs.extend(recs)
             reward += task_rewards
             constraint += task_constraints
 
         learner_trajs = np.array(learner_trajs)[:, :2]
-        # Update buffer
         self.learner_buffer = (
             np.concatenate([self.learner_buffer, learner_trajs], axis=0)
             if self.learner_buffer is not None
@@ -178,18 +282,30 @@ class MazeConstraintLearner:
         np.save(
             osp.join(self.args.log_path, f"constraint_{epoch}.npy"), constraint_grid
         )
-        self.plot_grid(
-            constraint_grid,
-            ("Multi" if self.maze_task == -1 else "Single") + "-Task ICL Constraint",
-            osp.join(self.args.log_path, f"{self.exp_name}_constraint_{epoch}.pdf"),
-            True,
-        )
-        self.plot_grid(
-            constraint_grid,
-            f"Single-Task ICL {self.exp_name}: Epoch: {epoch}",
-            osp.join(self.args.log_path, f"{self.exp_name}_raw_constraint_{epoch}.png"),
-            False,
-        )
+        if self.args.price.enabled:
+            task_mode = "multi-task" if self.maze_task == -1 else "single-task"
+            pdf_title = f"PRICE ({task_mode}) constraint"
+            raw_title = f"PRICE ({task_mode}), epoch {epoch}"
+            pdf_path = osp.join(
+                self.args.log_path, f"{self.exp_name}_price_constraint_{epoch}.pdf"
+            )
+            raw_path = osp.join(
+                self.args.log_path, f"{self.exp_name}_price_raw_constraint_{epoch}.png"
+            )
+        else:
+            pdf_title = (
+                "Multi" if self.maze_task == -1 else "Single"
+            ) + "-Task ICL Constraint"
+            raw_title = f"Single-Task ICL {self.exp_name}: Epoch: {epoch}"
+            pdf_path = osp.join(
+                self.args.log_path, f"{self.exp_name}_constraint_{epoch}.pdf"
+            )
+            raw_path = osp.join(
+                self.args.log_path, f"{self.exp_name}_raw_constraint_{epoch}.png"
+            )
+
+        self.plot_grid(constraint_grid, pdf_title, pdf_path, True)
+        self.plot_grid(constraint_grid, raw_title, raw_path, False)
 
 
 @pyrallis.wrap()
@@ -202,8 +318,12 @@ def render_constraint(args: ExpConfig):
 
 @pyrallis.wrap()
 def train(args: ExpConfig):
+    if args.use_price:
+        args.icl_config.price.enabled = True
+
     setup_plot_settings()
     os.makedirs(args.icl_config.log_path, exist_ok=True)
+    print(f"Logging to: {osp.abspath(args.icl_config.log_path)}")
 
     cl = MazeConstraintLearner(
         args.icl_config, args.maze_task, args.exp_name, args.baseline
@@ -215,15 +335,14 @@ def train(args: ExpConfig):
         "constraints": [],
     }
     for outer_epoch in range(args.epochs):
-        # Collect Trajs
         reward, constraint = cl.collect_trajs(outer_epoch)
         stats["rewards"].append(reward)
         stats["constraints"].append(constraint)
 
-        # Constraint Update
+        cl.prepare_price_constraint_phase(outer_epoch)
         cl.update_constraint()
+        cl.train_price_reward_model_pass()
 
-        # Visualize Constraint
         cl.visualize_constraint(outer_epoch)
         torch.save(
             cl.constraint.state_dict(),
@@ -238,4 +357,3 @@ def train(args: ExpConfig):
 
 if __name__ == "__main__":
     train()
-    # render_constraint()

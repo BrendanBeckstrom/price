@@ -1,6 +1,14 @@
 import os.path as osp
+import sys
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional, Tuple
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from price.config import PRICEConfig
 
 
 @dataclass
@@ -50,7 +58,7 @@ class CPOConfig:
     method: str = field(default="cpo")
     suffix: str = field(default="")  # !!!
     seed: int = field(default=100)  # !!!
-    device: str = field(default="cuda")
+    device: str = field(default="cpu")
     save_interval: int = field(default=4)
     render: bool = field(default=False)
     resume: bool = field(default=False)
@@ -107,9 +115,14 @@ class ICLConfig(CPOConfig):
     full_state: bool = field(default=False)
     use_noisy: bool = field(default=False)
     use_bc: bool = field(default=True)
+    use_price: bool = field(default=False)
+    """When True, enables PRICE (sets price.enabled); use --icl_config.use_price true."""
+    price: PRICEConfig = field(default_factory=PRICEConfig)
 
     def __post_init__(self):
         self.method = "icl"
+        if self.use_price:
+            self.price.enabled = True
         self.log_dir = "learners"
         self.log_path = osp.join(
             osp.dirname(osp.realpath(__file__)),

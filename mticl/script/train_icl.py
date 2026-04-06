@@ -70,7 +70,9 @@ def train(args: ICLConfig):
 
         # --------- Constraint Update ---------
         cl.collect_trajs(test_collector)
+        cl.prepare_price_constraint_phase(outer_epoch)
         cl.update_constraint()
+        cl.train_price_reward_model_pass()
         if not args.full_state:
             with open(f"{args.exp_name}.txt", "a") as f:
                 f.write(

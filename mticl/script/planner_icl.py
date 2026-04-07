@@ -40,11 +40,21 @@ class ExpConfig:
     epochs: int = 5
     use_price: bool = False
     """If True, sets icl_config.price.enabled (CLI: --use_price). Other fields: --icl_config.price.*"""
+    demo_dir: str = "demos"
+    """Directory containing maze_goal_* expert npz files (clean or corrupted tree)."""
+    demo_suffix: str = ""
+    """Filename suffix before .npz, e.g. '' -> maze_goal_0_demos.npz, '_vr5' -> maze_goal_0_demos_vr5.npz."""
 
 
 class MazeConstraintLearner:
     def __init__(
-        self, args: ICLConfig, maze_task: int, exp_name: str, baseline: bool = False
+        self,
+        args: ICLConfig,
+        maze_task: int,
+        exp_name: str,
+        baseline: bool = False,
+        demo_dir: str = "demos",
+        demo_suffix: str = "",
     ):
         self.args = args
         self.maze_task = maze_task
@@ -56,17 +66,19 @@ class MazeConstraintLearner:
         self._price_rm_pairs: list = []
         self._reward_model = None
 
+        def _demo_path(goal_idx: int) -> str:
+            base = f"maze_goal_{goal_idx}_demos{demo_suffix}.npz"
+            return osp.join(demo_dir, base)
+
         if self.maze_task in range(10):
             self.demos = np.load(
-                f"demos/maze_goal_{self.maze_task}_demos.npz",
+                _demo_path(self.maze_task),
                 allow_pickle=True,
             )["constraint_input"][:, :2]
         elif self.maze_task == -1:
             self.demos = np.concatenate(
                 [
-                    np.load(f"demos/maze_goal_{i}_demos.npz", allow_pickle=True,)[
-                        "constraint_input"
-                    ][:, :2]
+                    np.load(_demo_path(i), allow_pickle=True)["constraint_input"][:, :2]
                     for i in range(10)
                 ],
                 axis=0,
@@ -326,7 +338,12 @@ def train(args: ExpConfig):
     print(f"Logging to: {osp.abspath(args.icl_config.log_path)}")
 
     cl = MazeConstraintLearner(
-        args.icl_config, args.maze_task, args.exp_name, args.baseline
+        args.icl_config,
+        args.maze_task,
+        args.exp_name,
+        args.baseline,
+        demo_dir=args.demo_dir,
+        demo_suffix=args.demo_suffix,
     )
     cl.visualize_constraint(-1)
 

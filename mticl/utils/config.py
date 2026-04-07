@@ -124,13 +124,16 @@ class ICLConfig(CPOConfig):
         if self.use_price:
             self.price.enabled = True
         self.log_dir = "learners"
-        self.log_path = osp.join(
-            osp.dirname(osp.realpath(__file__)),
-            "../..",
-            self.log_dir,
-            self.task,
-            self.exp_name,
-        )
+        # Preserve CLI-provided log_path (breaking experiments); only default if unset.
+        _saved_log = (self.log_path or "").strip()
+        if not _saved_log:
+            self.log_path = osp.join(
+                osp.dirname(osp.realpath(__file__)),
+                "../..",
+                self.log_dir,
+                self.task,
+                self.exp_name,
+            )
         match (self.constraint_type, self.task):
             case ("Velocity", "AntBulletEnv-v0"):
                 self.reward_threshold = 1800

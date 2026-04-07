@@ -41,7 +41,7 @@ def go():
             acts=np.array(task_acts),
             constraint_input=np.array(task_constraint_input),
             dirs=np.array(task_dirs),
-            rewards=np.array(task_rewards),
+            rewards=np.asarray(task_rewards, dtype=object),
         )
 
 

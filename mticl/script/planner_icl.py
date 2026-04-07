@@ -22,29 +22,47 @@ class ExpConfig:
     icl_config: ICLConfig = ICLConfig()
     baseline: bool = False
     epochs: int = 5
+    demo_dir: str = "demos"
+    demo_suffix: str = ""
+    obs_noise_std: float = 0.0
 
 
 class MazeConstraintLearner:
     def __init__(
-        self, args: ICLConfig, maze_task: int, exp_name: str, baseline: bool = False
+        self,
+        args: ICLConfig,
+        maze_task: int,
+        exp_name: str,
+        baseline: bool = False,
+        demo_dir: str = "demos",
+        demo_suffix: str = "",
+        obs_noise_std: float = 0.0,
     ):
         self.args = args
         self.maze_task = maze_task
         self.exp_name = exp_name
+        self.demo_dir = demo_dir
+        self.demo_suffix = demo_suffix
+        self.obs_noise_std = obs_noise_std
         self.constraint = MazeConstraint()
         self.learner_buffer = None
 
         if self.maze_task in range(10):
-            self.demos = np.load(
-                f"demos/maze_goal_{self.maze_task}_demos.npz",
-                allow_pickle=True,
-            )["constraint_input"][:, :2]
+            demo_path = osp.join(
+                self.demo_dir,
+                f"maze_goal_{self.maze_task}_demos{self.demo_suffix}.npz",
+            )
+            self.demos = np.load(demo_path, allow_pickle=True)["constraint_input"][:, :2]
         elif self.maze_task == -1:
             self.demos = np.concatenate(
                 [
-                    np.load(f"demos/maze_goal_{i}_demos.npz", allow_pickle=True,)[
-                        "constraint_input"
-                    ][:, :2]
+                    np.load(
+                        osp.join(
+                            self.demo_dir,
+                            f"maze_goal_{i}_demos{self.demo_suffix}.npz",
+                        ),
+                        allow_pickle=True,
+                    )["constraint_input"][:, :2]
                     for i in range(10)
                 ],
                 axis=0,
@@ -127,6 +145,10 @@ class MazeConstraintLearner:
             self.c_opt.zero_grad()
             expert_batch, learner_batch = self.sample_batch()
 
+            if self.obs_noise_std > 0:
+                expert_batch = expert_batch + torch.randn_like(expert_batch) * self.obs_noise_std
+                learner_batch = learner_batch + torch.randn_like(learner_batch) * self.obs_noise_std
+
             c_learner = self.constraint.raw_forward(learner_batch.float())
             c_expert = self.constraint.raw_forward(expert_batch.float())
             c_output = torch.concat([c_expert, c_learner])
@@ -203,10 +225,18 @@ def render_constraint(args: ExpConfig):
 @pyrallis.wrap()
 def train(args: ExpConfig):
     setup_plot_settings()
+    args.icl_config.log_path = osp.abspath(args.icl_config.log_path)
     os.makedirs(args.icl_config.log_path, exist_ok=True)
+    print(f"Logging to: {args.icl_config.log_path}")
 
     cl = MazeConstraintLearner(
-        args.icl_config, args.maze_task, args.exp_name, args.baseline
+        args.icl_config,
+        args.maze_task,
+        args.exp_name,
+        baseline=args.baseline,
+        demo_dir=args.demo_dir,
+        demo_suffix=args.demo_suffix,
+        obs_noise_std=args.obs_noise_std,
     )
     cl.visualize_constraint(-1)
 

@@ -48,7 +48,7 @@ def sample_trajectory_pairs(
     num_pairs: int,
     rng: np.random.Generator,
 ) -> List[Tuple[TrajectoryRecord, TrajectoryRecord]]:
-    """Sample with replacement if fewer than 2 trajectories."""
+    """Sample num_pairs random pairs. Returns [] when fewer than 2 trajectories are available."""
     n = len(trajs)
     if n < 2:
         return []
@@ -93,11 +93,18 @@ def route_preference_batch(
 
     for (a, b), d, is_high in zip(pairs, dis_idx, high_mask):
         dis = a if d == 0 else b
-        pref = b if d == 0 else a
-        if is_high:
-            safety_chunks.append(np.asarray(dis.positions, dtype=np.float64))
+        if cfg.route_all_dispreferred and cfg.oracle == "gt_wall":
+            if dis.wall_violations > 0:
+                safety_chunks.append(np.asarray(dis.positions, dtype=np.float64))
+            elif is_high:
+                safety_chunks.append(np.asarray(dis.positions, dtype=np.float64))
+            else:
+                low_pairs.append((a, b, d))
         else:
-            low_pairs.append((a, b, d))
+            if is_high:
+                safety_chunks.append(np.asarray(dis.positions, dtype=np.float64))
+            else:
+                low_pairs.append((a, b, d))
 
     rng = rng or np.random.default_rng()
     if safety_chunks:

@@ -1,4 +1,5 @@
 import sys
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -25,6 +26,15 @@ from price.trajectory import TrajectoryRecord
 
 def to_torch(x: np.ndarray):
     return torch.tensor(x, dtype=torch.float32)
+
+
+def constraint_batch_sizes(constraint_batch_size: int, expert_batch_fraction: float):
+    """n_learner = constraint_batch_size; n_expert from fraction f of combined batch."""
+    f = float(expert_batch_fraction)
+    f = max(min(f, 1.0 - 1e-9), 1e-9)
+    n_learner = int(constraint_batch_size)
+    n_expert = max(1, int(round(n_learner * f / (1.0 - f))))
+    return n_expert, n_learner
 
 
 class Constraint(nn.Module):
@@ -150,6 +160,9 @@ class ConstraintLearner:
         self.routed_safety_features = np.zeros((0, 1), dtype=np.float32)
         self._price_rm_pairs: list = []
         self._reward_model = None
+        self._warned_expert_replace = False
+        self._warned_shape_mismatch = False
+        self._logged_constraint_batch = False
 
     def expert_cost(self):
         expert_costs = self.norm_constraint.eval_trajs(self.expert_trajs)
@@ -208,8 +221,21 @@ class ConstraintLearner:
         print(f"PRICE reward model mean loss: {loss:.6f}")
 
     def sample_batch(self):
-        batch_size = self.args.constraint_batch_size
-        expert_indices = np.random.choice(self.expert_steps, batch_size)
+        n_expert, n_learner = constraint_batch_sizes(
+            self.args.constraint_batch_size, self.args.expert_batch_fraction
+        )
+        replace_expert = n_expert > self.expert_steps
+        if replace_expert and not self._warned_expert_replace:
+            warnings.warn(
+                f"n_expert={n_expert} exceeds expert_steps={self.expert_steps}; "
+                "sampling experts with replace=True.",
+                UserWarning,
+                stacklevel=2,
+            )
+            self._warned_expert_replace = True
+        expert_indices = np.random.choice(
+            self.expert_steps, n_expert, replace=replace_expert
+        )
         expert_batch = self.expert_trajs[expert_indices]
 
         if (
@@ -219,11 +245,11 @@ class ConstraintLearner:
             and self.routed_safety_features.shape[1] == expert_batch.shape[1]
         ):
             n_route = min(
-                int(batch_size * self.args.price.routed_batch_fraction),
+                int(n_learner * self.args.price.routed_batch_fraction),
                 self.routed_safety_features.shape[0],
-                batch_size,
+                n_learner,
             )
-            n_rest = batch_size - n_route
+            n_rest = n_learner - n_route
             route_idx = np.random.choice(
                 self.routed_safety_features.shape[0], size=n_route, replace=True
             )
@@ -240,19 +266,42 @@ class ConstraintLearner:
                 learner_batch = np.concatenate([route_part, rest_part], axis=0)
             else:
                 learner_batch = route_part
-        else:
-            learner_indices = self.buffer.sample_indices(batch_size)
+        elif (
+            self.args.price.enabled
+            and self.routed_safety_features.size > 0
+            and self.routed_safety_features.shape[0] > 0
+            and self.routed_safety_features.shape[1] != expert_batch.shape[1]
+        ):
+            if not self._warned_shape_mismatch:
+                warnings.warn(
+                    f"[price] routed_safety_features dim "
+                    f"{self.routed_safety_features.shape[1]} != "
+                    f"expert dim {expert_batch.shape[1]}; "
+                    "falling back to learner buffer only.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+                self._warned_shape_mismatch = True
+            learner_indices = self.buffer.sample_indices(n_learner)
             learner_obs = self.buffer.get(learner_indices, key="obs").reshape(
-                batch_size, -1
+                n_learner, -1
             )[:, :-1]
             learner_ci = self.buffer.get(
                 learner_indices, key="info"
-            ).constraint_input.reshape(batch_size, -1)
+            ).constraint_input.reshape(n_learner, -1)
+            learner_batch = np.concatenate([learner_obs, learner_ci], axis=1)
+        else:
+            learner_indices = self.buffer.sample_indices(n_learner)
+            learner_obs = self.buffer.get(learner_indices, key="obs").reshape(
+                n_learner, -1
+            )[:, :-1]
+            learner_ci = self.buffer.get(
+                learner_indices, key="info"
+            ).constraint_input.reshape(n_learner, -1)
             learner_batch = np.concatenate([learner_obs, learner_ci], axis=1)
 
         expert_data = to_torch(expert_batch)
         learner_data = to_torch(learner_batch)
-        assert expert_data.shape == learner_data.shape
         return expert_data, learner_data
 
     def set_norm_constraint(self):
@@ -274,6 +323,17 @@ class ConstraintLearner:
         self.c_opt = Adam(self.constraint.parameters(), lr=self.args.constraint_lr)
         for idx in (pbar := tqdm(range(self.args.constraint_steps))):
             self.c_opt.zero_grad()
+            if idx == 0 and not self._logged_constraint_batch:
+                n_e, n_l = constraint_batch_sizes(
+                    self.args.constraint_batch_size, self.args.expert_batch_fraction
+                )
+                print(
+                    "[constraint] "
+                    f"n_expert={n_e} n_learner={n_l} "
+                    f"expert_batch_fraction={self.args.expert_batch_fraction} "
+                    f"route_all_dispreferred={self.args.price.route_all_dispreferred}"
+                )
+                self._logged_constraint_batch = True
             expert_batch, learner_batch = self.sample_batch()
 
             c_learner = self.constraint.raw_forward(learner_batch.float())

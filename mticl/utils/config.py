@@ -106,6 +106,8 @@ class ICLConfig(CPOConfig):
     # ICL params
     anneal_rate: float = field(default=10)
     constraint_batch_size: int = field(default=4096)
+    expert_batch_fraction: float = field(default=0.5)
+    """Fraction of combined constraint minibatch that is expert (−1); n_learner = constraint_batch_size."""
     outer_epochs: int = field(default=20)
     expert_traj_path: str = field(default="trajs/path.npz")
     constraint_lr: float = field(default=0.05)

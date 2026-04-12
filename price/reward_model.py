@@ -81,3 +81,28 @@ def train_reward_model_on_pairs(
         total_loss += float(loss.detach().cpu())
 
     return model, total_loss / steps
+
+#  (9, 0)] 91
+# ===== vr20 finished in 21001s =====
+
+# =================================================================
+#   Diagnostic v3 Summary
+# =================================================================
+# Final IoU: 0.5574
+# gen_valid_demo exhaustions: 150
+
+# Wall violations per epoch:
+# [price] epoch 0: 198/200 epoch trajectories have wall_violations > 0
+# [price] epoch 1: 18/200 epoch trajectories have wall_violations > 0
+# [price] epoch 2: 168/200 epoch trajectories have wall_violations > 0
+
+# Routed pool size per epoch:
+# [price] epoch 0: routed pool size = 16384 (added 16384 this epoch, growing)
+# [price] epoch 1: routed pool size = 32768 (added 16384 this epoch, growing)
+# [price] epoch 2: routed pool size = 49152 (added 16384 this epoch, growing)
+
+# Elapsed time: 21001s
+# Results saved under experiments\breaking\results\price_stable_diagnostic_v3\violate_20
+# =================================================================
+
+# (mticl) C:\Users\super\OneDrive\Desktop\AI final proj\price\mticl\experiments\breaking>

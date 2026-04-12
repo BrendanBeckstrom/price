@@ -101,13 +101,21 @@ def collect_run_metrics_ordered(
     parent: str,
     condition_order: List[str],
     compare_parent: Optional[str] = None,
-) -> Tuple[List[str], Dict[str, float], Dict[str, Optional[float]]]:
+    tertiary_parent: Optional[str] = None,
+) -> Tuple[
+    List[str],
+    Dict[str, float],
+    Dict[str, Optional[float]],
+    Dict[str, Optional[float]],
+]:
     """
     Like collect_run_metrics but uses ``condition_order`` for bar x positions (not sorted()).
+    Fourth dict is IoUs under ``tertiary_parent`` (e.g. PRICE-forward); all None if unset.
     """
     names = list(condition_order)
     primary: Dict[str, float] = {}
     secondary: Dict[str, Optional[float]] = {}
+    tertiary: Dict[str, Optional[float]] = {}
     gt = umaze_ground_truth_grid()
     for name in names:
         pdir = osp.join(parent, name)
@@ -124,17 +132,27 @@ def collect_run_metrics_ordered(
             )
         else:
             secondary[name] = None
-    return names, primary, secondary
+        if tertiary_parent:
+            tdir = osp.join(tertiary_parent, name)
+            tlp = latest_constraint_path(tdir) if osp.isdir(tdir) else None
+            tertiary[name] = (
+                constraint_iou(np.load(tlp), gt) if tlp is not None else None
+            )
+        else:
+            tertiary[name] = None
+    return names, primary, secondary, tertiary
 
 
 def plot_iou_vs_violation_curves(
     primary_root: str,
     out_path: str,
     compare_root: Optional[str] = None,
+    tertiary_root: Optional[str] = None,
     condition_order: Optional[List[str]] = None,
     xticklabels: Optional[List[str]] = None,
     primary_label: str = "MT-ICL",
     secondary_label: str = "PRICE",
+    tertiary_label: str = "PRICE-forward",
 ) -> None:
     """
     Line plot: IoU vs violation condition with explicit x order (see DEFAULT_CONDITION_ORDER).
@@ -168,6 +186,17 @@ def plot_iou_vs_violation_curves(
             markersize=9,
             color="C1",
         )
+    if tertiary_root:
+        y3 = iou_series_ordered(tertiary_root, order)
+        ax.plot(
+            x,
+            y3,
+            "^-",
+            label=tertiary_label,
+            linewidth=2,
+            markersize=9,
+            color="C2",
+        )
     ax.set_xticks(x)
     ax.set_xticklabels(xlabels)
     ax.set_ylabel("IoU vs ground-truth maze walls")
@@ -187,16 +216,35 @@ def plot_iou_comparison(
     out_path: str,
     primary_label: str = "MT-ICL",
     secondary_label: str = "PRICE",
+    tertiary: Optional[Dict[str, Optional[float]]] = None,
+    tertiary_label: str = "PRICE-forward",
 ) -> None:
     x = np.arange(len(names))
-    w = 0.35
     y1 = [primary[n] for n in names]
     has_sec = any(secondary[n] is not None for n in names)
-    fig, ax = plt.subplots(figsize=(max(8, len(names) * 0.6), 4))
-    ax.bar(x - w / 2, y1, width=w, label=primary_label)
-    if has_sec:
+    has_ter = tertiary is not None and any(tertiary[n] is not None for n in names)
+    fig, ax = plt.subplots(figsize=(max(8, len(names) * (0.75 if has_ter else 0.6)), 4))
+    if has_ter and has_sec:
+        w = 0.22
+        y2 = [secondary[n] if secondary[n] is not None else float("nan") for n in names]
+        y3 = [tertiary[n] if tertiary[n] is not None else float("nan") for n in names]
+        ax.bar(x - w, y1, width=w, label=primary_label)
+        ax.bar(x, y2, width=w, label=secondary_label)
+        ax.bar(x + w, y3, width=w, label=tertiary_label)
+    elif has_sec:
+        w = 0.35
+        ax.bar(x - w / 2, y1, width=w, label=primary_label)
         y2 = [secondary[n] if secondary[n] is not None else float("nan") for n in names]
         ax.bar(x + w / 2, y2, width=w, label=secondary_label)
+    elif has_ter:
+        assert tertiary is not None
+        w = 0.35
+        y3 = [tertiary[n] if tertiary[n] is not None else float("nan") for n in names]
+        ax.bar(x - w / 2, y1, width=w, label=primary_label)
+        ax.bar(x + w / 2, y3, width=w, label=tertiary_label)
+    else:
+        w = 0.35
+        ax.bar(x - w / 2, y1, width=w, label=primary_label)
     ax.set_xticks(x)
     ax.set_xticklabels(names, rotation=30, ha="right")
     ax.set_ylabel("IoU vs ground-truth maze walls")

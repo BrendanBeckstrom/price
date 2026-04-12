@@ -2,6 +2,7 @@ import math
 import os
 import os.path as osp
 import sys
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from itertools import product
@@ -28,7 +29,7 @@ from price.router import (
 )
 from price.trajectory import TrajectoryRecord
 from utils import ICLConfig, MazePlanner, setup_plot_settings, to_torch
-from utils.constraints import MazeConstraint
+from utils.constraints import MazeConstraint, constraint_batch_sizes
 
 
 @dataclass
@@ -65,6 +66,8 @@ class MazeConstraintLearner:
         self.routed_safety_xy = np.zeros((0, 2), dtype=np.float64)
         self._price_rm_pairs: list = []
         self._reward_model = None
+        self._warned_expert_replace = False
+        self._logged_constraint_batch = False
 
         def _demo_path(goal_idx: int) -> str:
             base = f"maze_goal_{goal_idx}_demos{demo_suffix}.npz"
@@ -87,7 +90,7 @@ class MazeConstraintLearner:
             raise NotImplementedError(f"Invalid maze task: {self.maze_task}")
 
     def prepare_price_constraint_phase(self, outer_epoch: int) -> None:
-        self.routed_safety_xy = np.zeros((0, 2), dtype=np.float64)
+        # Note: do not reset routed_safety_xy; accumulate across epochs.
         self._price_rm_pairs = []
         if not self.args.price.enabled:
             return
@@ -110,8 +113,30 @@ class MazeConstraintLearner:
             raise ValueError(f"Unknown price.oracle: {self.args.price.oracle}")
 
         res = route_preference_batch(pairs, label_fn, self.args.price, rng)
-        self.routed_safety_xy = np.asarray(res.safety_positions, dtype=np.float64)
+        new_safety = np.asarray(res.safety_positions, dtype=np.float64)
         self._price_rm_pairs = res.low_reward_pairs
+
+        # Strictly-growing pool: append new positions, never evict.
+        if new_safety.shape[0] > 0:
+            if self.routed_safety_xy.size == 0:
+                self.routed_safety_xy = new_safety
+            else:
+                self.routed_safety_xy = np.concatenate(
+                    [self.routed_safety_xy, new_safety], axis=0
+                )
+
+        # Soft warning if pool gets very large (memory check)
+        soft_cap = 200000
+        if self.routed_safety_xy.shape[0] > soft_cap:
+            print(
+                f"[price] WARNING: routed pool size {self.routed_safety_xy.shape[0]} "
+                f"exceeds soft cap {soft_cap}."
+            )
+
+        print(
+            f"[price] epoch {outer_epoch}: routed pool size = {self.routed_safety_xy.shape[0]} "
+            f"(added {new_safety.shape[0]} this epoch, growing)"
+        )
 
     def train_price_reward_model_pass(self) -> None:
         if not self.args.price.enabled or self.args.price.reward_model_steps <= 0:
@@ -127,13 +152,23 @@ class MazeConstraintLearner:
         print(f"PRICE reward model mean loss: {loss:.6f}")
 
     def sample_batch(self):
-        expert_indices = np.random.choice(
-            self.demos.shape[0], self.args.constraint_batch_size, replace=False
+        n_expert, n_learner = constraint_batch_sizes(
+            self.args.constraint_batch_size, self.args.expert_batch_fraction
         )
-        bs = self.args.constraint_batch_size
-
+        pool = self.demos.shape[0]
+        replace_expert = n_expert > pool
+        if replace_expert and not self._warned_expert_replace:
+            warnings.warn(
+                f"n_expert={n_expert} exceeds maze demo pool size={pool}; "
+                "sampling experts with replace=True.",
+                UserWarning,
+                stacklevel=2,
+            )
+            self._warned_expert_replace = True
+        expert_indices = np.random.choice(pool, n_expert, replace=replace_expert)
         expert_batch = to_torch(self.demos[expert_indices])
 
+        bs = n_learner
         if (
             self.args.price.enabled
             and self.routed_safety_xy.size > 0
@@ -165,7 +200,6 @@ class MazeConstraintLearner:
 
         learner_batch = to_torch(np.asarray(learner_xy, dtype=np.float64))
 
-        assert expert_batch.shape == learner_batch.shape
         return expert_batch, learner_batch
 
     def collect_task(self, task, outer_epoch):
@@ -227,6 +261,10 @@ class MazeConstraintLearner:
             reward += task_rewards
             constraint += task_constraints
 
+        n_violating = sum(1 for r in self.epoch_trajs if r.wall_violations > 0)
+        n_total = len(self.epoch_trajs)
+        print(f"[price] epoch {outer_epoch}: {n_violating}/{n_total} epoch trajectories have wall_violations > 0")
+
         learner_trajs = np.array(learner_trajs)[:, :2]
         self.learner_buffer = (
             np.concatenate([self.learner_buffer, learner_trajs], axis=0)
@@ -239,8 +277,19 @@ class MazeConstraintLearner:
     def update_constraint(self):
         self.constraint.train()
         self.c_opt = Adam(self.constraint.parameters(), lr=self.args.constraint_lr)
-        for _ in (pbar := tqdm(range(self.args.constraint_steps))):
+        for idx in (pbar := tqdm(range(self.args.constraint_steps))):
             self.c_opt.zero_grad()
+            if idx == 0 and not self._logged_constraint_batch:
+                n_e, n_l = constraint_batch_sizes(
+                    self.args.constraint_batch_size, self.args.expert_batch_fraction
+                )
+                print(
+                    "[constraint] "
+                    f"n_expert={n_e} n_learner={n_l} "
+                    f"expert_batch_fraction={self.args.expert_batch_fraction} "
+                    f"route_all_dispreferred={self.args.price.route_all_dispreferred}"
+                )
+                self._logged_constraint_batch = True
             expert_batch, learner_batch = self.sample_batch()
 
             c_learner = self.constraint.raw_forward(learner_batch.float())
@@ -308,7 +357,7 @@ class MazeConstraintLearner:
             pdf_title = (
                 "Multi" if self.maze_task == -1 else "Single"
             ) + "-Task ICL Constraint"
-            raw_title = f"Single-Task ICL {self.exp_name}: Epoch: {epoch}"
+            raw_title = f"{'Multi' if self.maze_task == -1 else 'Single'}-Task ICL {self.exp_name}: Epoch: {epoch}"
             pdf_path = osp.join(
                 self.args.log_path, f"{self.exp_name}_constraint_{epoch}.pdf"
             )
@@ -318,6 +367,43 @@ class MazeConstraintLearner:
 
         self.plot_grid(constraint_grid, pdf_title, pdf_path, True)
         self.plot_grid(constraint_grid, raw_title, raw_path, False)
+
+    def visualize_trajectories(self, epoch):
+        if not self.epoch_trajs:
+            return
+        fig, ax = plt.subplots(figsize=(6, 6))
+        # Ground truth wall mask in light gray as background
+        gt = np.zeros((10, 10))
+        gt[0:6, 2:5] = 1
+        gt[4:10, 6:9] = 1
+        ax.imshow(
+            gt, cmap="Greys", alpha=0.4,
+            extent=[-20, 20, -20, 20], origin="upper",
+        )
+        n_clean = 0
+        n_violating = 0
+        for traj in self.epoch_trajs:
+            color = "red" if traj.wall_violations > 0 else "blue"
+            ax.plot(
+                traj.positions[:, 0], traj.positions[:, 1],
+                color=color, alpha=0.3, linewidth=0.6,
+            )
+            if traj.wall_violations > 0:
+                n_violating += 1
+            else:
+                n_clean += 1
+        ax.set_xlim(-20, 20)
+        ax.set_ylim(-20, 20)
+        ax.set_aspect("equal")
+        ax.set_title(
+            f"{self.exp_name} epoch {epoch}: "
+            f"{n_violating} violating (red), {n_clean} clean (blue)"
+        )
+        out_path = osp.join(
+            self.args.log_path, f"{self.exp_name}_trajs_{epoch}.png"
+        )
+        fig.savefig(out_path, dpi=100, bbox_inches="tight")
+        plt.close(fig)
 
 
 @pyrallis.wrap()
@@ -346,6 +432,7 @@ def train(args: ExpConfig):
         demo_suffix=args.demo_suffix,
     )
     cl.visualize_constraint(-1)
+    cl.visualize_trajectories(-1)
 
     stats = {
         "rewards": [],
@@ -361,6 +448,7 @@ def train(args: ExpConfig):
         cl.train_price_reward_model_pass()
 
         cl.visualize_constraint(outer_epoch)
+        cl.visualize_trajectories(outer_epoch)
         torch.save(
             cl.constraint.state_dict(),
             osp.join(args.icl_config.log_path, f"constraint_{outer_epoch}.pt"),

@@ -25,6 +25,9 @@ class PRICEConfig:
     routed_batch_fraction: float = 0.25
     """Fraction of each constraint minibatch filled from routed safety positions (rest from learner buffer)."""
 
+    route_all_dispreferred: bool = False
+    """If True (gt_wall oracle), pool safety from dispreferred trajs with wall violations without median gating."""
+
     rng_seed: int = 0
 
     high_reward_rule_doc: str = field(

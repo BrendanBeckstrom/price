@@ -1,3 +1,5 @@
+import warnings
+
 import numpy as np
 import pyrallis
 import torch
@@ -6,7 +8,7 @@ from saferl.trainer import OnpolicyTrainer
 from torch.optim import Adam
 from tqdm import tqdm
 from utils import ICLConfig, setup_collector, setup_env, setup_policy, setup_seed
-from utils.constraints import ConstraintLearner, to_torch
+from utils.constraints import ConstraintLearner, constraint_batch_sizes, to_torch
 
 
 class BaselineConstraintLearner(ConstraintLearner):
@@ -17,12 +19,35 @@ class BaselineConstraintLearner(ConstraintLearner):
         for idx in (pbar := tqdm(range(self.args.constraint_steps))):
             self.c_opt.zero_grad()
 
-            batch_size = self.args.constraint_batch_size
-            expert_indices = np.random.choice(self.expert_steps, batch_size)
+            n_expert, n_learner = constraint_batch_sizes(
+                self.args.constraint_batch_size, self.args.expert_batch_fraction
+            )
+            replace_expert = n_expert > self.expert_steps
+            if replace_expert and not self._warned_expert_replace:
+                warnings.warn(
+                    f"n_expert={n_expert} exceeds expert_steps={self.expert_steps}; "
+                    "sampling experts with replace=True.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+                self._warned_expert_replace = True
+            expert_indices = np.random.choice(
+                self.expert_steps, n_expert, replace=replace_expert
+            )
             expert_data = self.expert_trajs[expert_indices]
-            learner_indices = np.random.choice(baseline_trajs.shape[0], batch_size)
+            learner_indices = np.random.choice(
+                baseline_trajs.shape[0], n_learner, replace=True
+            )
             learner_data = baseline_trajs[learner_indices]
-            assert expert_data.shape == learner_data.shape
+
+            if idx == 0 and not self._logged_constraint_batch:
+                print(
+                    "[constraint] "
+                    f"n_expert={n_expert} n_learner={n_learner} "
+                    f"expert_batch_fraction={self.args.expert_batch_fraction} "
+                    f"route_all_dispreferred={self.args.price.route_all_dispreferred}"
+                )
+                self._logged_constraint_batch = True
 
             expert_batch = to_torch(expert_data)
             learner_batch = to_torch(learner_data)

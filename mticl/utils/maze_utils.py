@@ -105,7 +105,9 @@ class WaypointGenerator:
     def compute_waypoints(self) -> tuple[list[tuple[int, int]], list[Direction]]:
         row, col = self.start
         traj, acts = [], [Direction.FREEZE]  # noop
-        while row != self.goal[0] or col != self.goal[1]:
+        for _ in range(200):
+            if row == self.goal[0] and col == self.goal[1]:
+                break
             act = self.expert(row, col)
             traj.append([row, col])
             acts.append(act)
@@ -272,21 +274,29 @@ class MazePlanner:
 
         return steps, dist_to_goal, traj, acts, ci, dirs, rewards
 
-    def gen_valid_demo(self, lim: int = 1500):
-        valid_traj = False
-        while not valid_traj:
+    def gen_valid_demo(self, lim: int = 1500, max_attempts: int = 50):
+        best = None
+        best_dist = float("inf")
+        for attempt in range(max_attempts):
             self.re_init()
             steps, dist_to_goal, traj, acts, ci, dirs, rewards = self.gen_demo(lim)
             print(
                 f"Current demo took {steps} steps and was"
                 f" {dist_to_goal} from goal with reward {sum(rewards)}"
             )
-            if not (valid_traj := steps <= lim and dist_to_goal < self.thresh):
-                print("RETRYING...")
-            else:
+            if steps <= lim and dist_to_goal < self.thresh:
                 print("FINISHED!")
                 self.render()
                 return traj, acts, ci, dirs, rewards
+            if dist_to_goal < best_dist:
+                best = (traj, acts, ci, dirs, rewards)
+                best_dist = dist_to_goal
+            print(f"RETRYING... ({attempt + 1}/{max_attempts})")
+        print(
+            f"WARNING: gen_valid_demo failed after {max_attempts} attempts "
+            f"(best dist={best_dist:.3f}). Returning best attempt."
+        )
+        return best
 
     def render(self):
         if self.render_mode == "rgb_array_list":

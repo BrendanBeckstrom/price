@@ -6,7 +6,8 @@ Examples:
       --compare_root path/to/price/results/price_suboptimal --out comparison_suboptimal.pdf
 
   python plot_suboptimal.py --primary_root ... --compare_root ... \\
-      --plot_style both --curves_out iou_vs_violation.pdf
+      --tertiary_root path/to/price_forward_suboptimal \\
+      --tertiary_label PRICE-forward --plot_style both --curves_out iou_three.pdf
 """
 
 from __future__ import annotations
@@ -41,7 +42,12 @@ def main():
     p.add_argument(
         "--compare_root",
         default=None,
-        help="Second results tree (same condition folder names), e.g. PRICE runs.",
+        help="Second results tree (same condition folder names), e.g. PRICE-conservative.",
+    )
+    p.add_argument(
+        "--tertiary_root",
+        default=None,
+        help="Optional third results tree, e.g. PRICE-forward (same condition folder names).",
     )
     p.add_argument(
         "--out",
@@ -70,6 +76,7 @@ def main():
     )
     p.add_argument("--primary_label", default="MT-ICL")
     p.add_argument("--secondary_label", default="PRICE")
+    p.add_argument("--tertiary_label", default="PRICE-forward")
     args = p.parse_args()
 
     condition_order = _parse_conditions(args.conditions)
@@ -87,10 +94,11 @@ def main():
         bar_out = osp.join(args.primary_root, bar_out)
 
     if args.plot_style in ("bars", "both"):
-        names, primary, secondary = collect_run_metrics_ordered(
+        names, primary, secondary, tertiary = collect_run_metrics_ordered(
             args.primary_root,
             condition_order,
             args.compare_root,
+            args.tertiary_root,
         )
         if all(isinstance(primary[n], float) and math.isnan(primary[n]) for n in names):
             raise SystemExit(
@@ -103,6 +111,8 @@ def main():
             bar_out,
             primary_label=args.primary_label,
             secondary_label=args.secondary_label,
+            tertiary=tertiary if args.tertiary_root else None,
+            tertiary_label=args.tertiary_label,
         )
         print(f"Wrote {bar_out}")
 
@@ -111,9 +121,11 @@ def main():
             args.primary_root,
             curves_out,
             compare_root=args.compare_root,
+            tertiary_root=args.tertiary_root,
             condition_order=condition_order,
             primary_label=args.primary_label,
             secondary_label=args.secondary_label,
+            tertiary_label=args.tertiary_label,
         )
         print(f"Wrote {curves_out}")
 
